@@ -1,0 +1,114 @@
+import sys
+!{sys.executable} -m pip install keras==2.3.1
+!{sys.executable} -m pip install --upgrade "numpy>=1.2"
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import keras
+
+## Apply transformations to our data
+
+from sklearn.utils import resample
+from sklearn.preprocessing import StandardScaler
+
+data = pd.read_csv('../resources/diabetes_readmission.csv')
+display(data.head())
+
+y = data['readmitted']
+X = data[['discharge', 'age', 'race', 'admission_type', 'specialty', 'time_in_hospital', 'diag_1', 'A1Cresult', 'change']].copy()
+
+scaler = StandardScaler()
+X['time_in_hospital'] = scaler.fit_transform(X[['time_in_hospital']])
+
+# create dummy variables
+X = pd.concat([X, pd.get_dummies(X['age'], prefix = 'age', drop_first=True)], axis=1)
+X = pd.concat([X, pd.get_dummies(X['race'], prefix = 'race', drop_first=True)], axis=1)
+X = pd.concat([X, pd.get_dummies(X['admission_type'], prefix = 'admission_type', drop_first=True)], axis=1)
+X = pd.concat([X, pd.get_dummies(X['specialty'], prefix = 'specialty', drop_first=True)], axis=1)
+X = pd.concat([X, pd.get_dummies(X['diag_1'], prefix = 'diag_1', drop_first=True)], axis=1)
+X = pd.concat([X, pd.get_dummies(X['A1Cresult'], prefix = 'A1Cresult', drop_first=True)], axis=1)
+
+# drop originals
+X = X.drop(['age', 'race', 'admission_type', 'specialty', 'diag_1', 'A1Cresult'], axis=1)
+
+# balance the classes
+display(y.value_counts())
+
+X_oversampled, y_oversampled = resample(X[y == 1], y[y == 1], replace=True, n_samples=X[y == 0].shape[0], random_state=42)
+
+X = pd.DataFrame(np.vstack((X[y == 0], X_oversampled)), columns=X.columns)
+y = np.hstack((y[y == 0], y_oversampled))
+
+display(pd.Series(y).value_counts())
+
+
+# Train the Neural Network
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.wrappers.scikit_learn import KerasClassifier
+from keras import backend as K
+from sklearn.model_selection import train_test_split
+from sklearn import metrics
+
+# train/test split, specify the seed for reproducible results
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33, random_state=42)
+
+# create a metric function that can give us AUC at the end of each epoch
+def auc(y_true, y_pred):
+    auc = tf.metrics.auc(y_true, y_pred)[1]
+    K.get_session().run(tf.local_variables_initializer())
+    return auc
+
+def build_model(num_layers=3):
+    model = Sequential()
+    for l in range(num_layers, 0, -1):
+        if l == num_layers:
+            model.add(Dense(X_train.shape[1]*l, input_dim=X_train.shape[1], activation='relu', kernel_initializer='he_normal'))
+        else:
+            model.add(Dense(X_train.shape[1]*l, activation='relu'))
+
+    model.add(Dense(1, activation='sigmoid'))
+    
+    optimizer = keras.optimizers.Adam(lr=0.01)
+    model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy', auc])
+    
+    return model
+
+model = KerasClassifier(build_fn=build_model, epochs=200, batch_size=2048, verbose=2)
+
+model.fit(X_train, y_train, shuffle=True)
+
+
+
+# Visualize and compare the results
+
+from sklearn import metrics
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report
+import matplotlib.pyplot as plt
+
+print('accuracy', model.score(X_test, y_test))
+
+probs = model.predict_proba(X_test)
+preds = probs[:,1]
+
+fpr, tpr, threshold = metrics.roc_curve(y_test, preds)
+roc_auc = metrics.auc(fpr, tpr)
+
+plt.title('Receiver Operating Characteristic')
+plt.plot(fpr, tpr, 'b', label = 'AUC = %0.2f' % roc_auc)
+plt.legend(loc = 'lower right')
+plt.plot([0, 1], [0, 1],'r--')
+plt.xlim([0, 1])
+plt.ylim([0, 1])
+plt.ylabel('True Positive Rate')
+plt.xlabel('False Positive Rate')
+plt.show()
+
+y_pred = model.predict(X_test)
+
+cmatrix = confusion_matrix(y_test, y_pred)
+print('confusion matrix:')
+print(cmatrix)
+print('\nclassification report:')
+print(classification_report(y_test, y_pred))
